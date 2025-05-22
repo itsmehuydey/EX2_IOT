@@ -3,5 +3,15 @@
     "idf.openOcdConfigs": [
         "board/esp32s3-bridge.cfg"
     ],
-    "C_Cpp.errorSquiggles": "disabled"
+    "C_Cpp.errorSquiggles": "disabled",
+    "files.associations": {
+        "array": "cpp",
+        "deque": "cpp",
+        "string": "cpp",
+        "unordered_map": "cpp",
+        "unordered_set": "cpp",
+        "vector": "cpp",
+        "string_view": "cpp",
+        "initializer_list": "cpp"
+    }
 }
