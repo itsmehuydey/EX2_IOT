@@ -12,8 +12,7 @@
 #define RS485_RX_PIN GPIO_NUM_44
 #define RS485_SERIAL_PORT 2
 #define RGB_PIN GPIO_NUM_3 // Chân GPIO3 cho LED RGB
-#define NUM_RGB_LEDS 1     // Số LED RGB (1 LED)
-
+#define NUM_RGB_LEDS 4     // Số LED RGB (1 LED)
 
 #include <WiFi.h>
 #include <Arduino_MQTT_Client.h>
@@ -336,17 +335,22 @@ float calculateAlertScore(float co2, float co, float alcohol, float toluene, flo
 void updateRGBLed(float temperature)
 {
   rgbLed.clear();
-  if (temperature < 26)
+  uint32_t color;
+  if (temperature < 35.0)
   {
-    rgbLed.setPixelColor(0, rgbLed.Color(0, 255, 0)); // Xanh
+    color = rgbLed.Color(0, 255, 0); // Green
   }
-  else if (temperature <= 29)
+  else if (temperature <= 50.0)
   {
-    rgbLed.setPixelColor(0, rgbLed.Color(255, 255, 0)); // Vàng
+    color = rgbLed.Color(255, 255, 0); // Yellow
   }
   else
   {
-    rgbLed.setPixelColor(0, rgbLed.Color(255, 0, 0)); // Đỏ
+    color = rgbLed.Color(255, 0, 0); // Red
+  }
+  for (int i = 0; i < NUM_RGB_LEDS; i++)
+  {
+    rgbLed.setPixelColor(i, color); // Set same color for all 4 LEDs
   }
   rgbLed.show();
 }
