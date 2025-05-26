@@ -1,3 +1,4 @@
+#include <Arduino.h>
 #define LIGHT_SENSOR_PIN GPIO_NUM_2
 #define LIGHT_LED_PIN GPIO_NUM_1
 #define LED_PIN 48
@@ -5,29 +6,28 @@
 #define SCL_PIN GPIO_NUM_12
 #define MQ2_PIN GPIO_NUM_6
 #define PIR_PIN GPIO_NUM_8
-#define MQ135_PIN GPIO_NUM_17 //D8
-#define LED_RGB_PIN 45
-#define NUMPIXELS 1
+#define MQ135_PIN GPIO_NUM_17 
+#define FAN_PIN GPIO_NUM_10
+#define RS485_TX_PIN GPIO_NUM_43
+#define RS485_RX_PIN GPIO_NUM_44
+#define RS485_SERIAL_PORT 2
+
 
 #include <WiFi.h>
 #include <Arduino_MQTT_Client.h>
 #include <ThingsBoard.h>
 #include "DHT20.h"
-#include <MQ135.h>
 #include "Wire.h"
 #include <ArduinoOTA.h>
 #include <time.h>
 #include "app_scheduler.h"
 #include <LiquidCrystal_I2C.h>
 #include <Adafruit_NeoPixel.h>
-// #include <bmp_sensor.h>
-// #include <MQ135.h>
-// #include <MFRC522.h>
+#include <MQUnifiedsensor.h>
+#include "driver/uart.h"
 
-constexpr char WIFI_SSID[] = "hcmut";
-constexpr char WIFI_PASSWORD[] = "123321000";
-// constexpr char WIFI_SSID[] = "iPhone";
-// constexpr char WIFI_PASSWORD[] = "777888111000";
+constexpr char WIFI_SSID[] = "ACLAB";
+constexpr char WIFI_PASSWORD[] = "ACLAB2023";
 // constexpr char TOKEN[] = "qxu9tl8c2pv2pmbn781w";
 constexpr char TOKEN[] = "bMkdOyTYGWbyT2796kbo";
 constexpr char THINGSBOARD_SERVER[] = "app.coreiot.io";
@@ -48,9 +48,19 @@ volatile bool ledState = false;
 
 LiquidCrystal_I2C lcd(0x21, 16, 2);
 
+char rs485Buffer[64];
+
 constexpr uint16_t BLINKING_INTERVAL_MS_MIN = 10U;
 constexpr uint16_t BLINKING_INTERVAL_MS_MAX = 60000U;
 volatile uint16_t blinkingInterval = 1000U;
+
+// MQ135 Definitions
+#define placa "ESP-32"
+#define Voltage_Resolution 5
+#define ADC_Bit_Resolution 12
+#define RatioMQ135CleanAir 3.6
+#define type "MQ-135"
+MQUnifiedsensor MQ135(placa, Voltage_Resolution, ADC_Bit_Resolution, MQ135_PIN, type);
 
 uint32_t previousStateChange = 0;
 constexpr int16_t telemetrySendInterval = 500U;
@@ -58,8 +68,7 @@ constexpr int16_t telemetrySendInterval = 500U;
 enum DisplayState
 {
     DHT_20,
-    MQ2,
-    MQ135
+    MQ2
 };
 DisplayState currentDisplay = DHT_20;
 uint32_t lastDisplaySwitch = 0;
@@ -67,19 +76,17 @@ const uint32_t DISPLAY_INTERVAL = 2000U; // 2 seconds
 bool motionDetected = false;
 uint32_t motionDisplayStart = 0;
 const uint32_t MOTION_DISPLAY_DURATION = 2000U; // 2 seconds
+volatile bool fanState = false;
 
-Adafruit_NeoPixel pixels(NUMPIXELS, LED_RGB_PIN, NEO_GRB + NEO_KHZ800);
+constexpr char FAN_STATE_ATTR[] = "fanState";
+constexpr char FAN_CONTROL_ATTR[] = "FAN";
 
-#define ADC_VREF 3.3
-#define ADC_RESOLUTION 4095.0
-volatile bool mq135_warmed_up = false;
-uint32_t mq135_warmup_start = 0;
-const uint32_t MQ135_WARMUP_DURATION = 60000;
-
-constexpr std::array<const char *, 3U> SHARED_ATTRIBUTES_LIST = {
+constexpr std::array<const char *, 5U> SHARED_ATTRIBUTES_LIST = {
     LED_STATE_ATTR,
     BLINKING_INTERVAL_ATTR,
-    LED_CONTROL_ATTR};
+    LED_CONTROL_ATTR,
+    FAN_STATE_ATTR,
+    FAN_CONTROL_ATTR};
 
 WiFiClient wifiClient;
 Arduino_MQTT_Client mqttClient(wifiClient);
@@ -110,6 +117,18 @@ void updateLedState(bool newState)
     attributesChanged = true;
 }
 
+void updateFanState(bool newState)
+{
+    fanState = newState;
+    digitalWrite(FAN_PIN, fanState);
+    Serial.print("FAN state updated to: ");
+    Serial.println(fanState);
+    tb.sendAttributeData("fanState", fanState);
+    tb.sendAttributeData("FAN", fanState ? "ON" : "OFF");
+    attributesChanged = true;
+}
+
+
 // RPC callback
 RPC_Response setLedSwitchState(const RPC_Data &data)
 {
@@ -121,8 +140,20 @@ RPC_Response setLedSwitchState(const RPC_Data &data)
     return RPC_Response("setLedSwitchValue", newState);
 }
 
-const std::array<RPC_Callback, 1U> callbacks = {
-    RPC_Callback{"setLedSwitchValue", setLedSwitchState}};
+RPC_Response setFanSwitchState(const RPC_Data &data)
+{
+    Serial.println("Received Fan Switch state via RPC");
+    bool newState = data;
+    Serial.print("Fan switch state change: ");
+    Serial.println(newState);
+    updateFanState(newState);
+    return RPC_Response("setFanSwitchValue", newState);
+}
+
+const std::array<RPC_Callback, 2U> callbacks = {
+    RPC_Callback{"setLedSwitchValue", setLedSwitchState},
+    RPC_Callback{"setFanSwitchValue", setFanSwitchState}};
+
 
 // Shared attributes callback
 void processSharedAttributes(const Shared_Attribute_Data &data)
@@ -162,6 +193,29 @@ void processSharedAttributes(const Shared_Attribute_Data &data)
                 Serial.println("Unknown LED control value");
             }
         }
+        else if (strcmp(it->key().c_str(), FAN_STATE_ATTR) == 0)
+{
+    bool newState = it->value().as<bool>();
+    updateFanState(newState);
+}
+else if (strcmp(it->key().c_str(), FAN_CONTROL_ATTR) == 0)
+{
+    String fanControl = it->value().as<String>();
+    Serial.print("FAN control received: ");
+    Serial.println(fanControl);
+    if (fanControl == "ON")
+    {
+        updateFanState(true);
+    }
+    else if (fanControl == "OFF")
+    {
+        updateFanState(false);
+    }
+    else
+    {
+        Serial.println("Unknown FAN control value");
+    }
+}
     }
     attributesChanged = true;
 }
@@ -244,7 +298,6 @@ void task_SendTelemetry()
     if (isnan(temperature) || isnan(humidity))
     {
         Serial.println("Failed to read from DHT20 sensor!");
-        updateTemperatureLED(temperature);
     }
     else
     {
@@ -321,91 +374,50 @@ void task_SendTelemetry()
         digitalWrite(LIGHT_LED_PIN, LOW);
     }
 
-    // if (mq135_warmed_up)
-    // {
-    //     int rawValue = 0;
-    //     for (int i = 0; i < 10; i++)
-    //     {
-    //         rawValue += analogRead(MQ135_PIN);
-    //         delay(10);
-    //     }
-    //     rawValue /= 10;
-    //     float voltage = (rawValue / ADC_RESOLUTION) * ADC_VREF;
-    //     float rzero = mq135_sensor.getRZero();
-    //     float ppm = (isnan(temperature) || isnan(humidity)) ? mq135_sensor.getPPM() : mq135_sensor.getCorrectedPPM(temperature, humidity);
-    //     float rs = mq135_sensor.getResistance();
-    //     float ppm_percent = (ppm / 10000) * 100;
-    //     float co_ppm = 116.6020682 * pow(rs / rzero, -2.769034857);
-    //     float alcohol_ppm = 605.995 * pow(rs / rzero, -3.013);
-    //     float toluene_ppm = 44.947 * pow(rs / rzero, -3.445);
-    //     float nh4_ppm = 102.2 * pow(rs / rzero, -2.473);
-    //     float acetone_ppm = 34.668 * pow(rs / rzero, -3.369);
+    // Đọc và gửi dữ liệu cảm biến MQ135
+MQ135.update();
 
-    //     if (ppm >= 0 && !isnan(ppm) && rzero > 0)
-    //     {
-    //         Serial.print("MQ135 - CO2: ");
-    //         Serial.print(ppm);
-    //         Serial.println(" ppm");
-    //         tb.sendTelemetryData("mq135_co2", ppm);
-    //     }
-    //     if (rzero > 0)
-    //     {
-    //         Serial.print("MQ135 - RZero: ");
-    //         Serial.print(rzero);
-    //         Serial.println(" kOhm");
-    //         tb.sendTelemetryData("mq135_rzero", rzero);
-    //     }
-    //     if (voltage >= 0)
-    //     {
-    //         Serial.print("MQ135 - Voltage: ");
-    //         Serial.print(voltage);
-    //         Serial.println(" V");
-    //         tb.sendTelemetryData("mq135_voltage", voltage);
-    //     }
-    //     Serial.print("MQ135 - CO2 Percent: ");
-    //     Serial.print(ppm_percent);
-    //     Serial.println(" %");
-    //     tb.sendTelemetryData("mq135_co2_percent", ppm_percent);
-    //     if (co_ppm >= 0 && !isnan(co_ppm))
-    //     {
-    //         Serial.print("MQ135 - CO: ");
-    //         Serial.print(co_ppm);
-    //         Serial.println(" ppm");
-    //         tb.sendTelemetryData("mq135_co", co_ppm);
-    //     }
-    //     if (alcohol_ppm >= 0 && !isnan(alcohol_ppm))
-    //     {
-    //         Serial.print("MQ135 - Alcohol: ");
-    //         Serial.print(alcohol_ppm);
-    //         Serial.println(" ppm");
-    //         tb.sendTelemetryData("mq135_alcohol", alcohol_ppm);
-    //     }
-    //     if (toluene_ppm >= 0 && !isnan(toluene_ppm))
-    //     {
-    //         Serial.print("MQ135 - Toluene: ");
-    //         Serial.print(toluene_ppm);
-    //         Serial.println(" ppm");
-    //         tb.sendTelemetryData("mq135_toluene", toluene_ppm);
-    //     }
-    //     if (nh4_ppm >= 0 && !isnan(nh4_ppm))
-    //     {
-    //         Serial.print("MQ135 - NH4: ");
-    //         Serial.print(nh4_ppm);
-    //         Serial.println(" ppm");
-    //         tb.sendTelemetryData("mq135_nh4", nh4_ppm);
-    //     }
-    //     if (acetone_ppm >= 0 && !isnan(acetone_ppm))
-    //     {
-    //         Serial.print("MQ135 - Acetone: ");
-    //         Serial.print(acetone_ppm);
-    //         Serial.println(" ppm");
-    //         tb.sendTelemetryData("mq135_acetone", acetone_ppm);
-    //     }
-    // }
-    // else
-    // {
-    //     Serial.println("MQ135 not warmed up yet");
-    // }
+// Đọc các giá trị khí
+MQ135.setA(605.18); MQ135.setB(-3.937); // Cấu hình cho CO
+float CO = MQ135.readSensor();
+
+MQ135.setA(77.255); MQ135.setB(-3.18); // Cấu hình cho Alcohol
+float Alcohol = MQ135.readSensor();
+
+MQ135.setA(110.47); MQ135.setB(-2.862); // Cấu hình cho CO2
+float CO2 = 410 + MQ135.readSensor();
+
+MQ135.setA(44.947); MQ135.setB(-3.445); // Cấu hình cho Toluene
+float Toluene = MQ135.readSensor();
+
+MQ135.setA(102.2); MQ135.setB(-2.473); // Cấu hình cho NH4
+float NH4 = MQ135.readSensor();
+
+MQ135.setA(34.668); MQ135.setB(-3.369); // Cấu hình cho Acetone
+float Acetone = MQ135.readSensor();
+
+// Gửi dữ liệu MQ135 đến ThingsBoard
+tb.sendTelemetryData("CO", CO);
+tb.sendTelemetryData("Alcohol", Alcohol);
+tb.sendTelemetryData("CO2", CO2);
+tb.sendTelemetryData("Toluene", Toluene);
+tb.sendTelemetryData("NH4", NH4);
+tb.sendTelemetryData("Acetone", Acetone);
+
+// Đánh giá chất lượng không khí
+String airQuality = (CO2 > 425 || CO > 50 || Alcohol > 50 || Toluene > 50 || NH4 > 50 || Acetone > 50) ? "Poor" : "Good";
+tb.sendTelemetryData("air_quality", airQuality.c_str());
+
+// Hiển thị giá trị lên Serial Monitor
+Serial.println("----------------------------------------------");
+Serial.print("CO: "); Serial.print(CO); Serial.println(" ppm");
+Serial.print("Alcohol: "); Serial.print(Alcohol); Serial.println(" ppm");
+Serial.print("CO2: "); Serial.print(CO2); Serial.println(" ppm");
+Serial.print("Toluene: "); Serial.print(Toluene); Serial.println(" ppm");
+Serial.print("NH4: "); Serial.print(NH4); Serial.println(" ppm");
+Serial.print("Acetone: "); Serial.print(Acetone); Serial.println(" ppm");
+Serial.print("Air Quality: "); Serial.println(airQuality);
+Serial.println("----------------------------------------------");
 
 }
 
@@ -509,6 +521,64 @@ void task_ProcessTB()
     }
 }
 
+void rs485_send(const char *data)
+{
+    Serial.print("RS485 Sending: ");
+    Serial.println(data);
+    uart_write_bytes(RS485_SERIAL_PORT, data, strlen(data));
+    uart_wait_tx_done(RS485_SERIAL_PORT, 100 / portTICK_PERIOD_MS);
+}
+
+void task_RS485_Receive()
+{
+    static bool firstRun = true;
+    if (firstRun)
+    {
+        Serial.println("RS485 Receive Task Started");
+        firstRun = false;
+    }
+    int len = uart_read_bytes(RS485_SERIAL_PORT, (uint8_t *)rs485Buffer, sizeof(rs485Buffer) - 1, 20 / portTICK_PERIOD_MS);
+    if (len > 0)
+    {
+        rs485Buffer[len] = '\0';
+        Serial.print("RS485 Received (len=");
+        Serial.print(len);
+        Serial.print("): ");
+        // In dữ liệu dạng chuỗi
+        Serial.println(rs485Buffer);
+        // In dữ liệu dạng hex để debug ký tự không in được
+        Serial.print("Raw data (hex): ");
+        for (int i = 0; i < len; i++)
+        {
+            Serial.print((uint8_t)rs485Buffer[i], HEX);
+            Serial.print(" ");
+        }
+        Serial.println();
+        tb.sendTelemetryData("rs485_data", rs485Buffer);
+    }
+}
+
+void task_RS485_SerialTest()
+{
+    static bool firstRun = true;
+    if (firstRun)
+    {
+        Serial.println("RS485 Serial Test Task Started");
+        firstRun = false;
+    }
+    if (Serial.available())
+    {
+        String input = Serial.readStringUntil('\n');
+        input.trim();
+        if (input.length() > 0)
+        {
+            Serial.print("Sending to RS485: ");
+            Serial.println(input);
+            rs485_send(input.c_str());
+        }
+    }
+}
+
 void setup()
 {
     Serial.begin(SERIAL_DEBUG_BAUD);
@@ -520,10 +590,49 @@ void setup()
     dht20.begin();
     pinMode(PIR_PIN, INPUT);
     pinMode(MQ135_PIN, INPUT);
+    pinMode(FAN_PIN, OUTPUT);
+    digitalWrite(FAN_PIN, LOW);
 
     lcd.init();
     lcd.backlight();
     Serial.println("LCD initialized");
+
+    // Cấu hình cảm biến MQ135
+MQ135.setRegressionMethod(1); 
+MQ135.init();
+
+// Hiệu chỉnh cảm biến
+Serial.println("Calibrating MQ135 please wait...");
+float calcR0 = 0;
+for (int i = 1; i <= 10; i++) {
+    MQ135.update();
+    calcR0 += MQ135.calibrate(RatioMQ135CleanAir);
+    Serial.print(".");
+}
+MQ135.setR0(calcR0 / 10);
+Serial.println(" done!");
+
+// Kiểm tra lỗi hiệu chỉnh
+if (isinf(calcR0)) {
+    Serial.println("Warning: Connection issue, R0 is infinite (Open circuit detected). Please check your wiring and supply.");
+}
+if (calcR0 == 0) {
+    Serial.println("Warning: Connection issue, R0 is zero (Analog pin with short circuit to ground). Please check your wiring and supply.");
+}
+
+const uart_config_t uart_config = {
+    .baud_rate = 9600,
+    .data_bits = UART_DATA_8_BITS,
+    .parity = UART_PARITY_DISABLE,
+    .stop_bits = UART_STOP_BITS_1,
+    .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+    .rx_flow_ctrl_thresh = 122,
+    .source_clk = UART_SCLK_APB, // Thay UART_SCLK_DEFAULT bằng UART_SCLK_APB
+};
+
+uart_param_config(RS485_SERIAL_PORT, &uart_config);
+uart_set_pin(RS485_SERIAL_PORT, RS485_TX_PIN, RS485_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+uart_driver_install(RS485_SERIAL_PORT, 256, 0, 0, NULL, 0);
 
     SCH_Init();
     SCH_Add_Task(task_InitWiFi, 0, 500);
@@ -531,10 +640,13 @@ void setup()
     SCH_Add_Task(task_SendTelemetry, 0, telemetrySendInterval);
     SCH_Add_Task(task_UpdateLCD, 0, 100);
     SCH_Add_Task(task_ProcessTB, 0, 10);
+    SCH_Add_Task(task_RS485_Receive, 0, 100); 
+SCH_Add_Task(task_RS485_SerialTest, 0, 100);
 }
 
 void loop()
 {
     SCH_Dispatch_Tasks();
 }
+
 
