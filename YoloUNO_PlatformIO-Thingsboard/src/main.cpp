@@ -6,6 +6,8 @@
 #define MQ2_PIN GPIO_NUM_6
 #define PIR_PIN GPIO_NUM_8
 #define MQ135_PIN GPIO_NUM_17 //D8
+#define LED_RGB_PIN 45
+#define NUMPIXELS 1
 
 #include <WiFi.h>
 #include <Arduino_MQTT_Client.h>
@@ -17,6 +19,7 @@
 #include <time.h>
 #include "app_scheduler.h"
 #include <LiquidCrystal_I2C.h>
+#include <Adafruit_NeoPixel.h>
 // #include <bmp_sensor.h>
 // #include <MQ135.h>
 // #include <MFRC522.h>
@@ -44,7 +47,6 @@ volatile int ledMode = 0;
 volatile bool ledState = false;
 
 LiquidCrystal_I2C lcd(0x21, 16, 2);
-MQ135 mq135_sensor(MQ135_PIN);
 
 constexpr uint16_t BLINKING_INTERVAL_MS_MIN = 10U;
 constexpr uint16_t BLINKING_INTERVAL_MS_MAX = 60000U;
@@ -66,6 +68,7 @@ bool motionDetected = false;
 uint32_t motionDisplayStart = 0;
 const uint32_t MOTION_DISPLAY_DURATION = 2000U; // 2 seconds
 
+Adafruit_NeoPixel pixels(NUMPIXELS, LED_RGB_PIN, NEO_GRB + NEO_KHZ800);
 
 #define ADC_VREF 3.3
 #define ADC_RESOLUTION 4095.0
@@ -231,35 +234,6 @@ void task_ThingsBoardConnect()
     }
 }
 
-void task_InitMQ135()
-{
-    if (!mq135_warmed_up)
-    {
-        if (mq135_warmup_start == 0)
-        {
-            Serial.println("Warming up MQ135 sensor...");
-            mq135_warmup_start = millis();
-        }
-        else if (millis() - mq135_warmup_start >= MQ135_WARMUP_DURATION)
-        {
-            Serial.println("MQ135 sensor warm-up complete");
-            float r0 = mq135_sensor.getRZero();
-            Serial.print("Initial R0: ");
-            Serial.println(r0);
-            if (r0 > 0)
-            {
-                tb.sendTelemetryData("mq135_r0_initial", r0);
-                mq135_warmed_up = true;
-            }
-            else
-            {
-                Serial.println("Invalid R0 value, retrying warm-up...");
-                mq135_warmup_start = 0;
-            }
-        }
-    }
-}
-
 void task_SendTelemetry()
 {
     // Đọc dữ liệu từ cảm biến DHT20
@@ -270,6 +244,7 @@ void task_SendTelemetry()
     if (isnan(temperature) || isnan(humidity))
     {
         Serial.println("Failed to read from DHT20 sensor!");
+        updateTemperatureLED(temperature);
     }
     else
     {
@@ -346,91 +321,91 @@ void task_SendTelemetry()
         digitalWrite(LIGHT_LED_PIN, LOW);
     }
 
-    if (mq135_warmed_up)
-    {
-        int rawValue = 0;
-        for (int i = 0; i < 10; i++)
-        {
-            rawValue += analogRead(MQ135_PIN);
-            delay(10);
-        }
-        rawValue /= 10;
-        float voltage = (rawValue / ADC_RESOLUTION) * ADC_VREF;
-        float rzero = mq135_sensor.getRZero();
-        float ppm = (isnan(temperature) || isnan(humidity)) ? mq135_sensor.getPPM() : mq135_sensor.getCorrectedPPM(temperature, humidity);
-        float rs = mq135_sensor.getResistance();
-        float ppm_percent = (ppm / 10000) * 100;
-        float co_ppm = 116.6020682 * pow(rs / rzero, -2.769034857);
-        float alcohol_ppm = 605.995 * pow(rs / rzero, -3.013);
-        float toluene_ppm = 44.947 * pow(rs / rzero, -3.445);
-        float nh4_ppm = 102.2 * pow(rs / rzero, -2.473);
-        float acetone_ppm = 34.668 * pow(rs / rzero, -3.369);
+    // if (mq135_warmed_up)
+    // {
+    //     int rawValue = 0;
+    //     for (int i = 0; i < 10; i++)
+    //     {
+    //         rawValue += analogRead(MQ135_PIN);
+    //         delay(10);
+    //     }
+    //     rawValue /= 10;
+    //     float voltage = (rawValue / ADC_RESOLUTION) * ADC_VREF;
+    //     float rzero = mq135_sensor.getRZero();
+    //     float ppm = (isnan(temperature) || isnan(humidity)) ? mq135_sensor.getPPM() : mq135_sensor.getCorrectedPPM(temperature, humidity);
+    //     float rs = mq135_sensor.getResistance();
+    //     float ppm_percent = (ppm / 10000) * 100;
+    //     float co_ppm = 116.6020682 * pow(rs / rzero, -2.769034857);
+    //     float alcohol_ppm = 605.995 * pow(rs / rzero, -3.013);
+    //     float toluene_ppm = 44.947 * pow(rs / rzero, -3.445);
+    //     float nh4_ppm = 102.2 * pow(rs / rzero, -2.473);
+    //     float acetone_ppm = 34.668 * pow(rs / rzero, -3.369);
 
-        if (ppm >= 0 && !isnan(ppm) && rzero > 0)
-        {
-            Serial.print("MQ135 - CO2: ");
-            Serial.print(ppm);
-            Serial.println(" ppm");
-            tb.sendTelemetryData("mq135_co2", ppm);
-        }
-        if (rzero > 0)
-        {
-            Serial.print("MQ135 - RZero: ");
-            Serial.print(rzero);
-            Serial.println(" kOhm");
-            tb.sendTelemetryData("mq135_rzero", rzero);
-        }
-        if (voltage >= 0)
-        {
-            Serial.print("MQ135 - Voltage: ");
-            Serial.print(voltage);
-            Serial.println(" V");
-            tb.sendTelemetryData("mq135_voltage", voltage);
-        }
-        Serial.print("MQ135 - CO2 Percent: ");
-        Serial.print(ppm_percent);
-        Serial.println(" %");
-        tb.sendTelemetryData("mq135_co2_percent", ppm_percent);
-        if (co_ppm >= 0 && !isnan(co_ppm))
-        {
-            Serial.print("MQ135 - CO: ");
-            Serial.print(co_ppm);
-            Serial.println(" ppm");
-            tb.sendTelemetryData("mq135_co", co_ppm);
-        }
-        if (alcohol_ppm >= 0 && !isnan(alcohol_ppm))
-        {
-            Serial.print("MQ135 - Alcohol: ");
-            Serial.print(alcohol_ppm);
-            Serial.println(" ppm");
-            tb.sendTelemetryData("mq135_alcohol", alcohol_ppm);
-        }
-        if (toluene_ppm >= 0 && !isnan(toluene_ppm))
-        {
-            Serial.print("MQ135 - Toluene: ");
-            Serial.print(toluene_ppm);
-            Serial.println(" ppm");
-            tb.sendTelemetryData("mq135_toluene", toluene_ppm);
-        }
-        if (nh4_ppm >= 0 && !isnan(nh4_ppm))
-        {
-            Serial.print("MQ135 - NH4: ");
-            Serial.print(nh4_ppm);
-            Serial.println(" ppm");
-            tb.sendTelemetryData("mq135_nh4", nh4_ppm);
-        }
-        if (acetone_ppm >= 0 && !isnan(acetone_ppm))
-        {
-            Serial.print("MQ135 - Acetone: ");
-            Serial.print(acetone_ppm);
-            Serial.println(" ppm");
-            tb.sendTelemetryData("mq135_acetone", acetone_ppm);
-        }
-    }
-    else
-    {
-        Serial.println("MQ135 not warmed up yet");
-    }
+    //     if (ppm >= 0 && !isnan(ppm) && rzero > 0)
+    //     {
+    //         Serial.print("MQ135 - CO2: ");
+    //         Serial.print(ppm);
+    //         Serial.println(" ppm");
+    //         tb.sendTelemetryData("mq135_co2", ppm);
+    //     }
+    //     if (rzero > 0)
+    //     {
+    //         Serial.print("MQ135 - RZero: ");
+    //         Serial.print(rzero);
+    //         Serial.println(" kOhm");
+    //         tb.sendTelemetryData("mq135_rzero", rzero);
+    //     }
+    //     if (voltage >= 0)
+    //     {
+    //         Serial.print("MQ135 - Voltage: ");
+    //         Serial.print(voltage);
+    //         Serial.println(" V");
+    //         tb.sendTelemetryData("mq135_voltage", voltage);
+    //     }
+    //     Serial.print("MQ135 - CO2 Percent: ");
+    //     Serial.print(ppm_percent);
+    //     Serial.println(" %");
+    //     tb.sendTelemetryData("mq135_co2_percent", ppm_percent);
+    //     if (co_ppm >= 0 && !isnan(co_ppm))
+    //     {
+    //         Serial.print("MQ135 - CO: ");
+    //         Serial.print(co_ppm);
+    //         Serial.println(" ppm");
+    //         tb.sendTelemetryData("mq135_co", co_ppm);
+    //     }
+    //     if (alcohol_ppm >= 0 && !isnan(alcohol_ppm))
+    //     {
+    //         Serial.print("MQ135 - Alcohol: ");
+    //         Serial.print(alcohol_ppm);
+    //         Serial.println(" ppm");
+    //         tb.sendTelemetryData("mq135_alcohol", alcohol_ppm);
+    //     }
+    //     if (toluene_ppm >= 0 && !isnan(toluene_ppm))
+    //     {
+    //         Serial.print("MQ135 - Toluene: ");
+    //         Serial.print(toluene_ppm);
+    //         Serial.println(" ppm");
+    //         tb.sendTelemetryData("mq135_toluene", toluene_ppm);
+    //     }
+    //     if (nh4_ppm >= 0 && !isnan(nh4_ppm))
+    //     {
+    //         Serial.print("MQ135 - NH4: ");
+    //         Serial.print(nh4_ppm);
+    //         Serial.println(" ppm");
+    //         tb.sendTelemetryData("mq135_nh4", nh4_ppm);
+    //     }
+    //     if (acetone_ppm >= 0 && !isnan(acetone_ppm))
+    //     {
+    //         Serial.print("MQ135 - Acetone: ");
+    //         Serial.print(acetone_ppm);
+    //         Serial.println(" ppm");
+    //         tb.sendTelemetryData("mq135_acetone", acetone_ppm);
+    //     }
+    // }
+    // else
+    // {
+    //     Serial.println("MQ135 not warmed up yet");
+    // }
 
 }
 
@@ -513,6 +488,7 @@ void task_UpdateLCD()
     }
 }
 
+
 void task_BlinkLED()
 {
     if (millis() - previousStateChange >= blinkingInterval)
@@ -561,3 +537,4 @@ void loop()
 {
     SCH_Dispatch_Tasks();
 }
+
