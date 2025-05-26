@@ -28,8 +28,8 @@
 
 constexpr char WIFI_SSID[] = "ACLAB";
 constexpr char WIFI_PASSWORD[] = "ACLAB2023";
-// constexpr char TOKEN[] = "qxu9tl8c2pv2pmbn781w";
-constexpr char TOKEN[] = "bMkdOyTYGWbyT2796kbo";
+constexpr char TOKEN[] = "PxwcRolAPNKFmuHcKkeS";
+// constexpr char TOKEN[] = "bMkdOyTYGWbyT2796kbo";
 constexpr char THINGSBOARD_SERVER[] = "app.coreiot.io";
 constexpr char NTP_SERVER[] = "pool.ntp.org";
 constexpr uint16_t THINGSBOARD_PORT = 1883U;
@@ -45,6 +45,30 @@ constexpr char LED_CONTROL_ATTR[] = "LED";
 volatile bool attributesChanged = false;
 volatile int ledMode = 0;
 volatile bool ledState = false;
+
+constexpr float CO2_THRESHOLD = 5000.0;      // ppm, giới hạn phơi nhiễm ngắn hạn trong công nghiệp  
+constexpr float CO_THRESHOLD = 25.0;         // ppm, giới hạn an toàn nghiêm ngặt hơn cho nhà máy  
+constexpr float ALCOHOL_THRESHOLD = 1000.0;  // ppm, ethanol trong môi trường sản xuất hóa chất  
+constexpr float TOLUENE_THRESHOLD = 50.0;    // ppm, giới hạn nghiêm ngặt do độc tính cao  
+constexpr float NH4_THRESHOLD = 25.0;        // ppm, ammonia có nguy cơ cao trong nhà máy  
+constexpr float ACETONE_THRESHOLD = 500.0;   // ppm, phù hợp với môi trường sử dụng dung môi  
+constexpr float TEMP_THRESHOLD = 45.0;       // °C, điều kiện khắc nghiệt trong nhà máy  
+constexpr float HUMIDITY_THRESHOLD = 90.0;   // %, môi trường ẩm công nghiệp  
+constexpr float MQ2_THRESHOLD = 2500.0;      // giá trị ADC, phát hiện khí dễ cháy  
+constexpr float LIGHT_THRESHOLD = 300.0;     // giá trị ADC, ánh sáng tối thiểu cho an toàn lao động  
+
+
+constexpr float W_CO2 = 0.3;
+constexpr float W_CO = 0.25;
+constexpr float W_ALCOHOL = 0.1;
+constexpr float W_TOLUENE = 0.1;
+constexpr float W_NH4 = 0.1;
+constexpr float W_ACETONE = 0.1;
+constexpr float W_TEMP = 0.1;
+constexpr float W_HUMIDITY = 0.05;
+constexpr float W_MQ2 = 0.05;
+constexpr float W_LIGHT = 0.03;
+constexpr float W_PIR = 0.02;
 
 LiquidCrystal_I2C lcd(0x21, 16, 2);
 
@@ -68,7 +92,8 @@ constexpr int16_t telemetrySendInterval = 500U;
 enum DisplayState
 {
     DHT_20,
-    MQ2
+    Light,
+    Alert
 };
 DisplayState currentDisplay = DHT_20;
 uint32_t lastDisplaySwitch = 0;
@@ -288,6 +313,23 @@ void task_ThingsBoardConnect()
     }
 }
 
+float calculateAlertScore(float co2, float co, float alcohol, float toluene, float nh4, float acetone,
+                         float temperature, float humidity, int mq2Value, int lightValue, int pirValue)
+{
+    float alertScore = (W_CO2 * (co2 / CO2_THRESHOLD)) +
+                       (W_CO * (co / CO_THRESHOLD)) +
+                       (W_ALCOHOL * (alcohol / ALCOHOL_THRESHOLD)) +
+                       (W_TOLUENE * (toluene / TOLUENE_THRESHOLD)) +
+                       (W_NH4 * (nh4 / NH4_THRESHOLD)) +
+                       (W_ACETONE * (acetone / ACETONE_THRESHOLD)) +
+                       (W_TEMP * (temperature / TEMP_THRESHOLD)) +
+                       (W_HUMIDITY * (humidity / HUMIDITY_THRESHOLD)) +
+                       (W_MQ2 * (mq2Value / MQ2_THRESHOLD)) +
+                       (W_LIGHT * (lightValue / LIGHT_THRESHOLD)) +
+                       (W_PIR * pirValue);
+    return alertScore;
+}
+
 void task_SendTelemetry()
 {
     // Đọc dữ liệu từ cảm biến DHT20
@@ -419,13 +461,37 @@ Serial.print("Acetone: "); Serial.print(Acetone); Serial.println(" ppm");
 Serial.print("Air Quality: "); Serial.println(airQuality);
 Serial.println("----------------------------------------------");
 
+float alertScore = calculateAlertScore(CO2, CO, Alcohol, Toluene, NH4, Acetone,
+                                      temperature, humidity, mq2Value, lightValue, pirValue);
+Serial.print("Alert Score: ");
+Serial.println(alertScore);
+tb.sendTelemetryData("alert_score", alertScore);
+
+String alertStatus;
+if (alertScore > 1.0)
+{
+    alertStatus = "Danger";
+}
+else if (alertScore > 0.5)
+{
+    alertStatus = "Warning";
+}
+else
+{
+    alertStatus = "Safe";
+}
+Serial.print("Alert Status: ");
+Serial.println(alertStatus);
+tb.sendTelemetryData("alert_status", alertStatus.c_str());
+
 }
 
 void task_UpdateLCD()
 {
     static float lastTemperature = 0.0;
     static float lastHumidity = 0.0;
-    static int lastMQ2Value = 0;
+    static int lastLightValue = 0;
+    static String lastAlertStatus = "Safe"; // Thêm biến lưu trạng thái cảnh báo
 
     // Update sensor values if valid
     dht20.read();
@@ -436,14 +502,31 @@ void task_UpdateLCD()
         lastTemperature = temperature;
         lastHumidity = humidity;
     }
-    int mq2Value = analogRead(MQ2_PIN);
-    if (mq2Value >= 0 && mq2Value <= 4095)
+    int lightValue = analogRead(LIGHT_SENSOR_PIN);
+    if (lightValue >= 0 && lightValue <= 4095)
     {
-        lastMQ2Value = mq2Value;
+        lastLightValue = lightValue;
     }
+    // Cập nhật alertStatus từ ThingsBoard hoặc tính local
+    int mq2Value = analogRead(MQ2_PIN);
+    int pirValue = digitalRead(PIR_PIN);
+    MQ135.update();
+    MQ135.setA(605.18); MQ135.setB(-3.937); float CO = MQ135.readSensor();
+    MQ135.setA(77.255); MQ135.setB(-3.18); float Alcohol = MQ135.readSensor();
+    MQ135.setA(110.47); MQ135.setB(-2.862); float CO2 = 410 + MQ135.readSensor();
+    MQ135.setA(44.947); MQ135.setB(-3.445); float Toluene = MQ135.readSensor();
+    MQ135.setA(102.2); MQ135.setB(-2.473); float NH4 = MQ135.readSensor();
+    MQ135.setA(34.668); MQ135.setB(-3.369); float Acetone = MQ135.readSensor();
+    float alertScore = calculateAlertScore(CO2, CO, Alcohol, Toluene, NH4, Acetone,
+                                          temperature, humidity, mq2Value, lightValue, pirValue);
+    if (alertScore > 1.0)
+        lastAlertStatus = "Danger";
+    else if (alertScore > 0.5)
+        lastAlertStatus = "Warning";
+    else
+        lastAlertStatus = "Safe";
 
     // Check for motion
-    int pirValue = digitalRead(PIR_PIN);
     if (pirValue == HIGH && !motionDetected)
     {
         motionDetected = true;
@@ -460,17 +543,17 @@ void task_UpdateLCD()
         {
             motionDetected = false;
             lcd.clear();
-            currentDisplay = DHT_20; // Reset to DHT20 display
+            currentDisplay = DHT_20;
             lastDisplaySwitch = millis();
         }
     }
     else
     {
-        // Alternate between DHT20 and MQ2 every 2 seconds
+        // Alternate between DHT20, Light, and Alert every 2 seconds
         if (millis() - lastDisplaySwitch >= DISPLAY_INTERVAL)
         {
             lcd.clear();
-            currentDisplay = (currentDisplay == DHT_20) ? MQ2 : DHT_20;
+            currentDisplay = (currentDisplay == DHT_20) ? Light : (currentDisplay == Light) ? Alert : DHT_20;
             lastDisplaySwitch = millis();
         }
 
@@ -487,14 +570,22 @@ void task_UpdateLCD()
             lcd.print(lastHumidity, 1);
             lcd.print("  ");
         }
-        else // MQ2
+        else if (currentDisplay == Light)
         {
             lcd.setCursor(0, 0);
-            lcd.print("Gas Sensor      ");
+            lcd.print("Light Sensor");
             lcd.setCursor(0, 1);
-            lcd.print("MQ2:         ppm");
+            lcd.print("         lux");
             lcd.setCursor(5, 1);
-            lcd.print(lastMQ2Value);
+            lcd.print(lastLightValue);
+            lcd.print("  ");
+        }
+        else // Alert
+        {
+            lcd.setCursor(0, 0);
+            lcd.print("Alert Status");
+            lcd.setCursor(0, 1);
+            lcd.print(lastAlertStatus);
             lcd.print("  ");
         }
     }
