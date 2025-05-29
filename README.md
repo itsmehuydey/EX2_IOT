@@ -1,6 +1,6 @@
 # 🌱 Smart Environmental Monitoring System | IoT + CoreIoT + ESP32
 
-🎓 This is a real-time IoT-based environmental monitoring and control system built for smart agricultural factories. It uses a combination of multiple environmental sensors, real-time telemetry via MQTT, and a centralized dashboard on CoreIoT (ThingsBoard). The system ensures worker safety, fire risk detection, intrusion alerts, and supports remote control of devices such as fans and lights. 🚨🌡️🧠
+🎓 This is a real-time IoT-based environmental monitoring and control system built for smart agricultural factories. It uses a combination of multiple environmental sensors, real-time telemetry via MQTT/Token, and a centralized dashboard on CoreIoT (ThingsBoard). The system ensures worker safety, fire risk detection, intrusion alerts, and supports remote control of devices such as fans and lights. 🚨🌡️🧠
 
 ---
 
